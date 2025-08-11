@@ -64,7 +64,8 @@ async def douyin_cookie_gen(account_file):
 
 
 class DouYinVideo(object):
-    def __init__(self, title, file_path, tags, publish_date: datetime, account_file, thumbnail_path=None):
+    def __init__(self, title, file_path, tags, publish_date: datetime, account_file, thumbnail_path=None,
+                 product_url=None, product_title=None):
         self.title = title  # 视频标题
         self.file_path = file_path
         self.tags = tags
@@ -73,6 +74,8 @@ class DouYinVideo(object):
         self.date_format = '%Y年%m月%d日 %H:%M'
         self.local_executable_path = LOCAL_CHROME_PATH
         self.thumbnail_path = thumbnail_path
+        self.product_url = product_url
+        self.product_title = product_title
 
     async def set_schedule_time_douyin(self, page, publish_date):
         # 选择包含特定文本内容的 label 元素
@@ -93,6 +96,21 @@ class DouYinVideo(object):
     async def handle_upload_error(self, page):
         douyin_logger.info('视频出错了，重新上传中')
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
+
+    async def add_product(self, page: Page):
+        if not self.product_url or not self.product_title:
+            return
+        douyin_logger.info('  [-] 正在添加商品...')
+        try:
+            await page.get_by_text('添加商品').click()
+            await page.wait_for_selector('div:has-text("添加商品")', timeout=5000)
+            await page.locator('input[placeholder*="商品链接"]').fill(self.product_url)
+            await page.get_by_role('button', name='添加').click()
+            await page.get_by_text(self.product_title, exact=False).first.click()
+            await page.get_by_role('button', name='确定').click()
+            douyin_logger.info('  [-] 商品添加完成')
+        except Exception as e:
+            douyin_logger.error('  [-] 商品添加失败')
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例
@@ -181,6 +199,8 @@ class DouYinVideo(object):
 
         # 更换可见元素
         await self.set_location(page, "杭州市")
+
+        await self.add_product(page)
 
         # 頭條/西瓜
         third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'

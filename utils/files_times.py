@@ -20,7 +20,7 @@ def get_title_and_hashtags(filename):
     filename: 视频文件名
 
   Returns:
-    视频标题和 hashtag 列表
+    视频标题、hashtag 列表、商品链接、商品短标题
   """
 
     # 获取视频标题和 hashtag txt 文件名
@@ -30,12 +30,14 @@ def get_title_and_hashtags(filename):
     with open(txt_filename, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 获取标题和 hashtag
+    # 获取标题、hashtag及商品信息
     splite_str = content.strip().split("\n")
-    title = splite_str[0]
-    hashtags = splite_str[1].replace("#", "").split(" ")
+    title = splite_str[0] if len(splite_str) > 0 else ""
+    hashtags = splite_str[1].replace("#", "").split(" ") if len(splite_str) > 1 else []
+    product_url = splite_str[2] if len(splite_str) > 2 else None
+    product_title = splite_str[3] if len(splite_str) > 3 else None
 
-    return title, hashtags
+    return title, hashtags, product_url, product_title
 
 
 def generate_schedule_time_next_day(total_videos, videos_per_day = 1, daily_times=None, timestamps=False, start_days=0):
