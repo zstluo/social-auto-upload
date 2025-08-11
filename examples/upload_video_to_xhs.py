@@ -33,7 +33,7 @@ if __name__ == '__main__':
     publish_datetimes = generate_schedule_time_next_day(file_num, 1, daily_times=[16])
 
     for index, file in enumerate(files):
-        title, tags = get_title_and_hashtags(str(file))
+        title, tags, _, _ = get_title_and_hashtags(str(file))
         # 加入到标题 补充标题（xhs 可以填1000字不写白不写）
         tags_str = ' '.join(['#' + tag for tag in tags])
         hash_tags_str = ''
@@ -57,11 +57,13 @@ if __name__ == '__main__':
 
         hash_tags_str = ' ' + ' '.join(['#' + tag + '[话题]#' for tag in hash_tags])
 
-        note = xhs_client.create_video_note(title=title[:20], video_path=str(file),
-                                            desc=title + tags_str + hash_tags_str,
-                                            topics=topics,
-                                            is_private=False,
-                                            post_time=publish_datetimes[index].strftime("%Y-%m-%d %H:%M:%S"))
+        note = xhs_client.create_video_note(
+            title=title[:20], video_path=str(file),
+            desc=title + tags_str + hash_tags_str,
+            topics=topics,
+            is_private=False,
+            post_time=publish_datetimes[index].strftime("%Y-%m-%d %H:%M:%S")
+        )
 
         beauty_print(note)
         # 强制休眠30s，避免风控（必要）

@@ -17,7 +17,7 @@ if __name__ == '__main__':
     publish_datetimes = generate_schedule_time_next_day(file_num, 1, daily_times=[16])
     cookie_setup = asyncio.run(tiktok_setup(account_file, handle=True))
     for index, file in enumerate(files):
-        title, tags = get_title_and_hashtags(str(file))
+        title, tags, _, _ = get_title_and_hashtags(str(file))
         thumbnail_path = file.with_suffix('.png')
         print(f"video_file_name：{file}")
         print(f"video_title：{title}")
