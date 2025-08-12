@@ -67,7 +67,7 @@ async def main():
         elif args.platform == SOCIAL_MEDIA_KUAISHOU:
             await ks_setup(str(account_file), handle=True)
     elif args.action == 'upload':
-        title, tags = get_title_and_hashtags(args.video_file)
+        title, tags, product_url, product_title = get_title_and_hashtags(args.video_file)
         video_file = args.video_file
 
         if args.publish_type == 0:
@@ -79,7 +79,8 @@ async def main():
 
         if args.platform == SOCIAL_MEDIA_DOUYIN:
             await douyin_setup(account_file, handle=False)
-            app = DouYinVideo(title, video_file, tags, publish_date, account_file)
+            app = DouYinVideo(title, video_file, tags, publish_date, account_file,
+                 product_url=product_url, product_title=product_title)
         elif args.platform == SOCIAL_MEDIA_TIKTOK:
             await tiktok_setup(account_file, handle=True)
             app = TiktokVideo(title, video_file, tags, publish_date, account_file)
