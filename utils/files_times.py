@@ -2,13 +2,28 @@ from datetime import timedelta
 
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Union
 
 from conf import BASE_DIR
 
 
-def get_absolute_path(relative_path: str, base_dir: str = None) -> str:
-    # Convert the relative path to an absolute path
-    absolute_path = Path(BASE_DIR) / base_dir / relative_path
+def get_absolute_path(relative_path: Union[str, Path], base_dir: Optional[str] = None) -> str:
+    """Return an absolute path under the cookies directory.
+
+    If ``relative_path`` is already absolute it will be returned unchanged.
+    Otherwise the path will be constructed as ``BASE_DIR / "cookies" / base_dir / relative_path``.
+    ``base_dir`` is optional so callers can choose a specific uploader folder.
+    """
+
+    path = Path(relative_path)
+    if path.is_absolute():
+        return str(path)
+
+    base_path = Path(BASE_DIR) / "cookies"
+    if base_dir:
+        base_path /= base_dir
+
+    absolute_path = base_path / path
     return str(absolute_path)
 
 
