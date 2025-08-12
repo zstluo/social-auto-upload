@@ -44,7 +44,7 @@ def post_video_DouYin(title,files,tags,account_file,category=TencentZoneTypes.LI
             print(f"视频文件名：{file}")
             print(f"标题：{title}")
             print(f"Hashtag：{tags}")
-            app = DouYinVideo(title, str(file), tags, publish_datetimes[index], cookie, category)
+            app = DouYinVideo(title, str(file), tags, publish_datetimes[index], cookie)
             asyncio.run(app.main(), debug=False)
 
 
