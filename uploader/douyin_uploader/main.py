@@ -2,129 +2,173 @@
 from datetime import datetime
 from playwright.async_api import Playwright, async_playwright, Page
 import os
-import asyncio
 import re
+import asyncio
+from typing import List, Tuple, Optional
 
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 
 
-async def cookie_auth(account_file: str) -> bool:
+# ---------------------------
+# 基础：cookie 检测 / 生成
+# ---------------------------
+async def cookie_auth(account_file: str, headless: bool = True) -> bool:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(headless=headless)
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
-
         page = await context.new_page()
-        await page.goto("https://creator.douyin.com/creator-micro/content/upload")
-
         try:
-            await page.wait_for_url(
-                "https://creator.douyin.com/creator-micro/content/upload", timeout=5000
-            )
+            await page.goto("https://creator.douyin.com/creator-micro/content/upload")
+            await page.wait_for_url("**/creator-micro/content/upload", timeout=15000)
         except Exception:
-            print("[+] 等待5秒 cookie 失效")
+            douyin_logger.info("[cookie] cookie 失效")
             await context.close()
             await browser.close()
             return False
 
-        # 2024.06.17 抖音创作者中心改版
+        # 登录页判断（2024.06 后新版）
         if await page.get_by_text('手机号登录').count() or await page.get_by_text('扫码登录').count():
-            print("[+] 等待5秒 cookie 失效")
+            douyin_logger.info("[cookie] cookie 失效")
             await context.close()
             await browser.close()
             return False
-        else:
-            print("[+] cookie 有效")
-            await context.close()
-            await browser.close()
-            return True
+
+        douyin_logger.info("[cookie] cookie 有效")
+        await context.close()
+        await browser.close()
+        return True
 
 
-async def douyin_setup(account_file: str, handle: bool = False) -> bool:
-    if not os.path.exists(account_file) or not await cookie_auth(account_file):
-        if not handle:
-            return False
-        douyin_logger.info('[+] cookie文件不存在或已失效，即将自动打开浏览器，请扫码登录，登陆后会自动生成cookie文件')
-        await douyin_cookie_gen(account_file)
+async def douyin_setup(account_file: str, handle: bool = False, account_alias: str = "", headless: bool = True) -> bool:
+    if os.path.exists(account_file) and await cookie_auth(account_file, headless=headless):
+        return True
+
+    if not handle:
+        return False
+
+    douyin_logger.info(f"[cookie] 为账号 {account_alias or 'default'} 创建/更新 cookie，请扫码登录")
+    await douyin_cookie_gen(account_file, headless=False)
     return True
 
 
-async def douyin_cookie_gen(account_file: str) -> None:
+async def douyin_cookie_gen(account_file: str, headless: bool = False) -> None:
     async with async_playwright() as playwright:
-        options = {'headless': False}
-        browser = await playwright.chromium.launch(**options)
+        browser = await playwright.chromium.launch(headless=headless)
         context = await browser.new_context()
         context = await set_init_script(context)
 
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/")
-        await page.pause()  # 点击调试器继续后，会保存 cookie
+        await page.pause()  # 你点继续后会保存 cookie
         await context.storage_state(path=account_file)
 
         await context.close()
         await browser.close()
 
 
+# ---------------------------
+# .txt 读取与覆盖
+# 1 行：标题
+# 2 行：话题（逗号/空格/中文逗号分隔；可写 #xxx）
+# 3 行：商品链接
+# 4 行：商品短标题
+# ---------------------------
+def read_txt_payload(txt_path: Optional[str]) -> Tuple[Optional[str], List[str], Optional[str], Optional[str]]:
+    if not txt_path:
+        return None, [], None, None
+    if not os.path.exists(txt_path):
+        douyin_logger.warning(f"[txt] 文件不存在：{txt_path}")
+        return None, [], None, None
+
+    with open(txt_path, "r", encoding="utf-8") as f:
+        raw_lines = [line.strip() for line in f.readlines() if line.strip() != ""]
+
+    title = None
+    tags: List[str] = []
+    product_url = None
+    product_title = None
+
+    if len(raw_lines) >= 1:
+        title = raw_lines[0][:1000]  # 抖音标题上限兜底
+
+    if len(raw_lines) >= 2:
+        # 支持 "#旅游 #美食" 或 "旅游,美食" 或 "旅游 美食"
+        tline = raw_lines[1]
+        tline = tline.replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
+        parts = re.split(r"[,\s]+", tline)
+        tags = [p.lstrip("#").strip() for p in parts if p.strip()]
+
+    if len(raw_lines) >= 3:
+        product_url = raw_lines[2].strip()
+
+    if len(raw_lines) >= 4:
+        product_title = raw_lines[3].strip()[:10]  # 商品短标题 ≤10 字
+
+    # 只给了两行 -> 不挂车
+    if len(raw_lines) == 2:
+        product_url = None
+        product_title = None
+
+    return title, tags, product_url, product_title
+
+
+# ---------------------------
+# DouYinVideo 主流程
+# ---------------------------
 class DouYinVideo(object):
     def __init__(
         self,
         title: str,
         file_path: str,
-        tags,
+        tags: List[str],
         publish_date: datetime,
         account_file: str,
         thumbnail_path: str = None,
         product_url: str = None,
-        product_title: str = None
+        product_title: str = None,
+        txt_path: str = None,          # 新增：可传 .txt 一键覆盖
+        headless: bool = False,        # 可视化/无头切换（CLI 会传）
     ):
+        # 先用 cli 传入的
         self.title = title
         self.file_path = file_path
-        self.tags = tags
+        self.tags = tags or []
         self.publish_date = publish_date
         self.account_file = account_file
-        self.date_format = '%Y年%m月%d日 %H:%M'
-        self.local_executable_path = LOCAL_CHROME_PATH
         self.thumbnail_path = thumbnail_path
         self.product_url = product_url
         self.product_title = product_title
+        self.date_format = '%Y年%m月%d日 %H:%M'
+        self.local_executable_path = LOCAL_CHROME_PATH
+        self.headless = headless
 
-    # ---------- 关键：等待“编辑商品”弹窗 ----------
-    async def _wait_product_dialog(self, page: Page):
-        """
-        等待“编辑商品”弹窗（抖音挂在 .semi-portal 内，用 .semi-modal-wrap）
-        """
-        dialog = page.locator(".semi-portal .semi-modal-wrap:has-text('编辑商品')").last
-        await dialog.wait_for(state="visible", timeout=15000)
-        return dialog
+        # 若给了 .txt，覆盖字段
+        t_title, t_tags, t_url, t_short = read_txt_payload(txt_path)
+        if t_title: self.title = t_title
+        if t_tags: self.tags = t_tags
+        # 判断：只有两行就不挂车；四行就挂车
+        if t_url and t_short:
+            self.product_url = t_url
+            self.product_title = t_short
+        elif txt_path:
+            # 明确告知：只给了两行/或不完整，视为不挂车
+            if t_url or t_short:
+                douyin_logger.warning("[txt] 购物车信息不完整（需要 4 行），此次不挂车")
+            else:
+                douyin_logger.info("[txt] 检测到 2 行文本（标题/话题），此次不挂车")
 
-    # ---------- 关键：定时发布前确保无弹窗 ----------
+    # ---------- 组件方法 ----------
     async def set_schedule_time_douyin(self, page: Page, publish_date: datetime):
-        # 先确保没有 modal 遮挡
-        try:
-            await page.locator(".semi-portal .semi-modal-wrap").wait_for(state="detached", timeout=5000)
-        except Exception:
-            # 兜底：尝试点“完成编辑/完成/取消/关闭”把可能的弹窗关掉
-            for txt in ("完成编辑", "完成", "取消", "关闭"):
-                btn = page.get_by_role("button", name=txt)
-                if await btn.count():
-                    try:
-                        await btn.first.click()
-                        await page.locator(".semi-portal .semi-modal-wrap").wait_for(state="detached", timeout=5000)
-                        break
-                    except Exception:
-                        pass
-
         label_element = page.locator("[class^='radio']:has-text('定时发布')")
         await label_element.click()
         await asyncio.sleep(0.2)
-
         publish_date_hour = publish_date.strftime("%Y-%m-%d %H:%M")
-        date_box = page.locator('.semi-input[placeholder="日期和时间"]').first
-        await date_box.click()
+        await page.locator('.semi-input[placeholder="日期和时间"]').click()
         await page.keyboard.press("Control+A")
-        await page.keyboard.type(publish_date_hour)
+        await page.keyboard.type(str(publish_date_hour))
         await page.keyboard.press("Enter")
         await asyncio.sleep(0.2)
 
@@ -132,48 +176,32 @@ class DouYinVideo(object):
         douyin_logger.info('视频出错了，重新上传中')
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
 
-    # ---------- 关键：添加商品整链 ----------
     async def add_product(self, page: Page):
         """
-        扩展信息 → 添加标签：
-        1) 在“添加标签”行把类型切换为【购物车】
-        2) 粘贴商品链接 → 点【添加链接】
-        3) 弹出“编辑商品” → 填【商品短标题】→ 点【完成编辑】→ 等弹窗关闭
+        添加商品（购物车）：
+        - 正常：出现【编辑商品】 → 填“商品短标题” → 完成编辑 → (True, "ok")
+        - 若出现【无法添加购物车】→ 终止（不发布），落地截图/HTML → (False, "quota_reached")
+        - 异常 → 落地截图/HTML → (False, "error")
         """
         if not self.product_url:
             douyin_logger.info('  [-] 未提供商品链接，跳过加商品')
-            return
+            return True, "skipped"
 
         douyin_logger.info('  [-] 正在添加商品...')
         try:
-            # A. 锁定“扩展信息”卡片（先按你页上稳定 class，失败再退回通用选择）
-            ext_card = page.locator("div:has(> .title-bu2hyo:has-text('扩展信息'))").first
-            if not await ext_card.count():
-                heading = page.locator("xpath=//*[normalize-space()='扩展信息']").first
-                await heading.wait_for(timeout=10000)
-                ext_card = heading.locator("xpath=ancestor::*[contains(@class,'semi-card')][1]").first
-
+            # 1) 找到“扩展信息”卡片和“添加标签”块
+            ext_card = page.locator("css=div:has(> .title-bu2hyo:has-text('扩展信息'))").first
             await ext_card.wait_for(state='attached', timeout=8000)
             await ext_card.scroll_into_view_if_needed()
-            try:
-                await ext_card.wait_for(state='visible', timeout=4000)
-            except Exception:
-                pass
 
-            # B. 找到“添加标签”对应的一行
-            tag_row = ext_card.locator(
-                "div:has(.title-dS7kae .title-content-oaqcSp:has-text('添加标签'))"
+            tag_block = ext_card.locator(
+                "css=div:has(.title-dS7kae .title-content-oaqcSp:has-text('添加标签'))"
             ).first
-            if not await tag_row.count():
-                tag_row = ext_card.locator(
-                    "xpath=.//div[contains(@class,'semi-form-field')][.//*[contains(normalize-space(),'添加标签')]]"
-                ).first
+            await tag_block.wait_for(state='attached', timeout=8000)
+            await tag_block.scroll_into_view_if_needed()
 
-            await tag_row.wait_for(state='attached', timeout=10000)
-            await tag_row.scroll_into_view_if_needed()
-
-            # C. 左侧下拉：切到【购物车】
-            type_select = tag_row.locator(".semi-select").first
+            # 2) 左侧下拉 → 购物车
+            type_select = tag_block.locator(".semi-select").first
             await type_select.wait_for(state='visible', timeout=8000)
             await type_select.click()
 
@@ -194,80 +222,83 @@ class DouYinVideo(object):
             if not await is_cart_selected():
                 raise Exception("切换到“购物车”失败")
 
-            # D. 中间输入：#douyin_creator_pc_anchor_jump 内的输入框
-            input_scope = tag_row.locator("#douyin_creator_pc_anchor_jump").first
+            # 3) 填链接 + 点“添加链接”
+            input_scope = tag_block.locator("#douyin_creator_pc_anchor_jump").first
             url_input = input_scope.locator("input, textarea, .semi-input input").first
             await url_input.wait_for(state='visible', timeout=10000)
             await url_input.click()
-            try:
-                await page.keyboard.press("Control+A")
-            except Exception:
-                pass
+            try: await page.keyboard.press("Control+A")
+            except Exception: pass
             await page.keyboard.press("Backspace")
-            await url_input.fill(self.product_url.strip())
+            await url_input.fill(self.product_url)
 
-            # 若误成“位置”出现“输入地理位置”，再强制切回购物车
-            if await tag_row.get_by_text('输入地理位置', exact=False).count():
-                await type_select.click()
-                await option_cart.click()
-                await url_input.click()
-                try:
-                    await page.keyboard.press("Control+A")
-                except Exception:
-                    pass
-                await page.keyboard.press("Backspace")
-                await url_input.fill(self.product_url.strip())
+            add_btn = tag_block.get_by_text("添加链接", exact=False).first
+            await add_btn.click()
 
-            # E. 右侧点击“添加链接”
-            await tag_row.get_by_text("添加链接", exact=False).first.click()
+            # 4) 等待两种结果之一
+            edit_dialog = page.locator("div[role='dialog']:has-text('编辑商品')").first
+            quota_dialog = page.locator("div[role='dialog']:has-text('无法添加购物车')").first
 
-            # F. 弹窗：填写“商品短标题”→ 完成编辑 → 等弹窗关闭
-            dialog = await self._wait_product_dialog(page)
-
-            short_title = dialog.locator(
-                "xpath=.//*[contains(normalize-space(),'商品短标题')]/ancestor::div[contains(@class,'semi-form-field')][1]//input | "
-                ".//*[contains(normalize-space(),'商品短标题')]/ancestor::div[contains(@class,'semi-form-field')][1]//textarea"
-            )
-            if await short_title.count() == 0:
-                short_title = dialog.locator("input[placeholder*='短标题'], textarea[placeholder*='短标题']")
-
-            await short_title.first.wait_for(state="visible", timeout=8000)
-            await short_title.first.click()
+            # 优先等编辑弹窗
             try:
-                await page.keyboard.press("Control+A")
+                await edit_dialog.wait_for(timeout=8000)
+                # 正常编辑：填商品短标题 → 完成编辑
+                short_title = edit_dialog.locator(
+                    "input[placeholder*='商品短标题'], textarea[placeholder*='商品短标题'], "
+                    "input[placeholder*='短标题'], textarea[placeholder*='短标题']"
+                )
+                if await short_title.count():
+                    await short_title.first.click()
+                    try: await page.keyboard.press("Control+A")
+                    except Exception: pass
+                    await page.keyboard.press("Backspace")
+                    await short_title.first.fill((self.product_title or self.title or "同款")[:10])
+
+                finish_btn = edit_dialog.get_by_role("button", name=re.compile("完成编辑|完成")).or_(
+                    edit_dialog.get_by_text("完成编辑", exact=False)
+                )
+                await finish_btn.first.click()
+                douyin_logger.success('  [-] 商品添加完成')
+                return True, "ok"
+
             except Exception:
-                pass
-            await page.keyboard.press("Backspace")
-            await short_title.first.fill((self.product_title or self.title or "同款")[:10])
+                # 检查是否配额限制
+                if await quota_dialog.count():
+                    douyin_logger.error("  [×] 无法添加购物车：今日/当周额度已满 → 本次发布已停止")
+                    # 记录页面，便于复盘
+                    try:
+                        await page.screenshot(path='add_product_error.png', full_page=True)
+                        with open('full_page.html', 'w', encoding='utf-8') as f:
+                            f.write(await page.content())
+                    except Exception:
+                        pass
+                    # 可选择点击“取消/查看规则/×”，这里不必强行关闭
+                    return False, "quota_reached"
 
-            finish_btn = dialog.get_by_role("button", name=re.compile("完成编辑|完成"))
-            await finish_btn.first.click()
-            await dialog.wait_for(state="detached", timeout=15000)
-
-            douyin_logger.success('  [-] 商品添加完成')
+                # 其它未知情况
+                raise
 
         except Exception as e:
             douyin_logger.error(f'  [-] 商品添加失败: {e}')
             try:
                 await page.screenshot(path='add_product_error.png', full_page=True)
-            except Exception:
-                pass
-            try:
                 with open('full_page.html', 'w', encoding='utf-8') as f:
                     f.write(await page.content())
             except Exception:
                 pass
+            return False, "error"
 
+    # ---------- 主上传 ----------
     async def upload(self, playwright: Playwright) -> None:
         # 启动浏览器
         if self.local_executable_path:
             browser = await playwright.chromium.launch(
-                headless=False, executable_path=self.local_executable_path
+                headless=self.headless, executable_path=self.local_executable_path
             )
         else:
-            browser = await playwright.chromium.launch(headless=False)
+            browser = await playwright.chromium.launch(headless=self.headless)
 
-        # 用 cookie 创建上下文；提前授予 geolocation 权限，避免弹窗挡住点击
+        # 用 cookie 创建上下文；提前给 geolocation 权限，避免弹窗挡表单
         context = await browser.new_context(storage_state=f"{self.account_file}")
         context = await set_init_script(context)
         await context.grant_permissions(["geolocation"], origin="https://creator.douyin.com")
@@ -275,66 +306,58 @@ class DouYinVideo(object):
 
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
-        douyin_logger.info(f'[+]正在上传-------{self.title}.mp4')
+        douyin_logger.info(f'[+]正在上传: {os.path.basename(self.file_path)}')
         douyin_logger.info('[-] 正在打开主页...')
-        await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload")
+        await page.wait_for_url("**/creator-micro/content/upload", timeout=30000)
 
-        # 选择视频
-        await page.locator("div[class^='container'] input").set_input_files(self.file_path)
+        # 上传视频
+        await page.locator("div[class^='container'] input[type='file']").first.set_input_files(self.file_path)
 
-        # 等待进入发布页面（两种版本）
+        # 等两种发布页
         while True:
             try:
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/publish?enter_from=publish_page",
-                    timeout=3000
-                )
-                douyin_logger.info("[+] 成功进入version_1发布页面!")
+                await page.wait_for_url("**/content/publish?enter_from=publish_page", timeout=3000)
+                douyin_logger.info("[+] 成功进入 version_1 发布页")
                 break
             except Exception:
                 try:
-                    await page.wait_for_url(
-                        "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
-                        timeout=3000
-                    )
-                    douyin_logger.info("[+] 成功进入version_2发布页面!")
+                    await page.wait_for_url("**/content/post/video?enter_from=publish_page", timeout=3000)
+                    douyin_logger.info("[+] 成功进入 version_2 发布页")
                     break
                 except Exception:
-                    print("  [-] 超时未进入视频发布页面，重新尝试...")
+                    douyin_logger.info("  [-] 正在等待进入发布页...")
                     await asyncio.sleep(0.5)
 
         # 标题 + 话题
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.8)
         douyin_logger.info('  [-] 正在填充标题和话题...')
         title_container = (
-            page.get_by_text('作品标题')
-            .locator("..")
-            .locator("xpath=following-sibling::div[1]")
-            .locator("input")
+            page.get_by_text('作品标题').locator("..").locator("xpath=following-sibling::div[1]").locator("input")
         )
         if await title_container.count():
-            await title_container.fill(self.title[:30])
+            await title_container.fill((self.title or "")[:30])
         else:
-            titlecontainer = page.locator(".notranslate")
-            await titlecontainer.click()
-            await page.keyboard.press("Backspace")
-            await page.keyboard.press("Control+A")
-            await page.keyboard.press("Delete")
-            await page.keyboard.type(self.title)
-            await page.keyboard.press("Enter")
+            # 兜底：富文本
+            title_rich = page.locator(".notranslate")
+            if await title_rich.count():
+                await title_rich.click()
+                await page.keyboard.press("Control+A")
+                await page.keyboard.press("Backspace")
+                await page.keyboard.type(self.title or "")
+                await page.keyboard.press("Enter")
 
         css_selector = ".zone-container"
-        for tag in self.tags:
+        for tag in (self.tags or []):
             await page.type(css_selector, "#" + tag)
             await page.press(css_selector, "Space")
-        douyin_logger.info(f'总共添加{len(self.tags)}个话题')
+        douyin_logger.info(f'  [-] 共添加 {len(self.tags)} 个话题')
 
-        # 等待上传完成
+        # 等上传完成
         while True:
             try:
                 number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
                 if number > 0:
-                    douyin_logger.success("  [-]视频上传完毕")
+                    douyin_logger.success("  [-] 视频上传完毕")
                     break
                 else:
                     douyin_logger.info("  [-] 正在上传视频中...")
@@ -349,16 +372,33 @@ class DouYinVideo(object):
         # 封面（可选）
         await self.set_thumbnail(page, self.thumbnail_path)
 
-        # 添加商品
-        await self.add_product(page)
+        # —— 添加商品（根据 txt 是否 4 行自动决定）——
+        added, reason = await self.add_product(page)
+        if not added and reason == "quota_reached":
+            # 需求：配额弹窗出现 → 终止发布
+            await context.storage_state(path=self.account_file)  # 仍然保存最新 cookie
+            douyin_logger.error("  [×] 因购物车额度限制，本次任务已停止并未发布。详见 add_product_error.png / full_page.html")
+            await context.close()
+            await browser.close()
+            return
+        elif not added and reason == "error":
+            # 异常也不发布
+            await context.storage_state(path=self.account_file)
+            douyin_logger.error("  [×] 添加商品出现异常，本次未发布。详见 add_product_error.png / full_page.html")
+            await context.close()
+            await browser.close()
+            return
 
-        # 头条/西瓜联动开关
+        # 头条/西瓜联动开关（按需）
         third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
-        if await page.locator(third_part_element).count():
-            if 'semi-switch-checked' not in await page.eval_on_selector(
-                third_part_element, 'div => div.className'
-            ):
-                await page.locator(third_part_element).locator('input.semi-switch-native-control').click()
+        try:
+            if await page.locator(third_part_element).count():
+                if 'semi-switch-checked' not in await page.eval_on_selector(
+                    third_part_element, 'div => div.className'
+                ):
+                    await page.locator(third_part_element).locator('input.semi-switch-native-control').click()
+        except Exception:
+            pass
 
         # 定时发布
         if self.publish_date != 0:
@@ -370,11 +410,8 @@ class DouYinVideo(object):
                 publish_button = page.get_by_role('button', name="发布", exact=True)
                 if await publish_button.count():
                     await publish_button.click()
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/manage**",
-                    timeout=3000
-                )
-                douyin_logger.success("  [-]视频发布成功")
+                await page.wait_for_url("**/content/manage**", timeout=3000)
+                douyin_logger.success("  [-] 视频发布成功")
                 break
             except Exception:
                 douyin_logger.info("  [-] 视频正在发布中...")
@@ -382,8 +419,8 @@ class DouYinVideo(object):
                 await asyncio.sleep(0.5)
 
         await context.storage_state(path=self.account_file)  # 保存cookie
-        douyin_logger.success('  [-]cookie更新完毕！')
-        await asyncio.sleep(1)
+        douyin_logger.success('  [-] cookie 更新完毕！')
+        await asyncio.sleep(0.5)
         await context.close()
         await browser.close()
 
@@ -392,22 +429,14 @@ class DouYinVideo(object):
             await page.click('text="选择封面"')
             await page.wait_for_selector("div.semi-modal-content:visible")
             await page.click('text="设置竖封面"')
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
             await page.locator(
                 "div[class^='semi-upload upload'] >> input.semi-upload-hidden-input"
             ).set_input_files(thumbnail_path)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
             await page.locator(
                 "div[class^='extractFooter'] button:visible:has-text('完成')"
             ).click()
-
-    async def set_location(self, page: Page, location: str = "杭州市"):
-        await page.locator('div.semi-select span:has-text("输入地理位置")').click()
-        await page.keyboard.press("Backspace")
-        await page.wait_for_timeout(2000)
-        await page.keyboard.type(location)
-        await page.wait_for_selector('div[role="listbox"] [role="option"]', timeout=5000)
-        await page.locator('div[role="listbox"] [role="option"]').first.click()
 
     async def main(self):
         async with async_playwright() as playwright:
